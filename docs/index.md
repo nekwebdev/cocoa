@@ -12,11 +12,7 @@ Automate the first steps of configuring a fresh arch / cachyos linux installatio
 - QEMU/Virt manager installation
 - ...
 
-<div>
-  <a href="https://github.com/nekwebdev/cocoa/releases/latest/download/cocoa">⬇️ Download latest</a>
-  &nbsp;|&nbsp;
-  <a href="https://github.com/nekwebdev/cocoa">View on GitHub</a>
-</div>
+[⬇️ Latest release](https://github.com/nekwebdev/cocoa/releases/latest/download/cocoa)">
 
 ## Quick start
 ```bash
