@@ -10,8 +10,6 @@ Automate the first steps of configuring a fresh arch / cachyos linux installatio
 - QEMU/Virt manager installation
 - ...
 
-[⬇️ Latest release](https://github.com/nekwebdev/cocoa/releases/latest/download/cocoa)
-
 ## Quick start
 ```bash
 curl -fsSL https://github.com/nekwebdev/cocoa/releases/latest/download/cocoa -o $HOME/.local/bin/cocoa
