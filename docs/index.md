@@ -2,8 +2,6 @@
 layout: default
 ---
 
-# Cocoa
-
 Automate the first steps of configuring a fresh arch / cachyos linux installation.
 
 - pacman and paru configarions (parallel downloads, colors, bottom up, etc...)
@@ -12,7 +10,7 @@ Automate the first steps of configuring a fresh arch / cachyos linux installatio
 - QEMU/Virt manager installation
 - ...
 
-[⬇️ Latest release](https://github.com/nekwebdev/cocoa/releases/latest/download/cocoa)">
+[⬇️ Latest release](https://github.com/nekwebdev/cocoa/releases/latest/download/cocoa)
 
 ## Quick start
 ```bash

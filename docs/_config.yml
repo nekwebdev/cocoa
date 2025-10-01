@@ -1,6 +1,6 @@
 title: cocoa
 description: tiny shell helper to help setup a fresh arch/cachyos install
-logo: /assets/logo.png
+logo: assets/logo.png
 show_downloads: true
 remote_theme: pages-themes/minimal@v0.2.0
 plugins:
