@@ -1,5 +1,5 @@
 ---
-layout: default
+layout: cocoa
 ---
 
 Automate the first steps of configuring a fresh arch / cachyos linux installation.
