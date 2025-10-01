@@ -1,0 +1,614 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2086
+# shellcheck source=/dev/null
+
+# https://github.com/nekwebdev/cocoa
+# @nekwebdev
+# LICENSE: GPLv3
+#
+# ./cocoa
+#
+# script to configure fresh arch linux / cachyos installation.
+#
+
+set -euo pipefail
+
+###### => variables ################################################################
+# if no environment variables are set revert to defaults
+: "${XDG_CONFIG_HOME:="$HOME/.config"}"
+
+# paths
+readonly cocoa_dir="$XDG_CONFIG_HOME/cocoa"
+readonly unit_dir="$XDG_CONFIG_HOME/systemd/user"
+readonly env_d_dir="$XDG_CONFIG_HOME/environment.d"
+readonly fish_d_dir="$XDG_CONFIG_HOME/fish/conf.d"
+readonly zshrc_d_dir="$XDG_CONFIG_HOME/zsh/zshrc.d"
+readonly journal_dir="/etc/systemd/journald.conf.d"
+readonly ssh_dir="$HOME/.ssh"
+readonly bashrc_d_dir="$XDG_CONFIG_HOME/bash/bashrc.d"
+readonly git_dir="$XDG_CONFIG_HOME/git"
+readonly cocoa_log="$HOME/.local/log/cocoa.log"
+readonly ssh_unit_file="$unit_dir/ssh-agent.service"
+readonly ssh_env_file="$env_d_dir/20-ssh-agent.conf"
+readonly ssh_fish_file="$fish_d_dir/ssh-agent.fish"
+readonly ssh_zsh_file="$zshrc_d_dir/ssh-agent.zsh"
+readonly ssh_bash_file="$bashrc_d_dir/ssh-agent.sh"
+readonly ssh_config="$ssh_dir/config"
+readonly journal_file="$journal_dir/00-persistent-storage.conf"
+readonly xdg_env_file="$env_d_dir/00-xdg-base.conf"
+readonly git_config="$git_dir/config"
+  
+###### => cocoa config #############################################################
+# default cocoa.conf
+# readonly cocoa_default_cfg="$(cat <<-EOF
+# mirrors_countries_cfg="United States" # countries to use for mirrors
+# vfont_cfg="lat1-14" # ter-132n large terminus-font find them with /usr/share/kbd/consolefonts | grep ...
+# fontmap_cfg="8859-1"
+# # dotfiles
+# github_user_cfg="username" # github user name
+# dots_repo_cfg="dotfiles" # github dotfiles repo name
+# dots_git_url="https://github.com/$github_user_cfg/$dots_stow_repo_cfg.git" # dotfiles repo url
+# dots_stow_dir_cfg="/data/dotfiles" # directory to clone stow dotfiles to
+# dots_stow_link_cfg="$HOME/.dotfiles" # link to stow dotfiles
+# dots_worktree_cfg="$HOME" # local work tree
+# dots_dir_cfg="$XDG_CONFIG_HOME/dotfiles" # local dotfiles directory
+# dots_backupdir_cfg="$XDG_CONFIG_HOME/dots-backup" # backup directory for conflicting files during checkout
+# # ssh
+# ssh_key_cfg="my_ssh_key" # name for the ssh key to be created or used if already in $XDG_CONFIG_HOME/ssh
+# EOF
+# )"
+# [[ -f ./cocoa.conf ]] || echo "$cocoa_default_cfg" > ./cocoa.conf
+
+# source ./cocoa.conf
+
+###### => setup logfile ############################################################
+# create fresh logfile
+mkdir -p "$(dirname "$cocoa_log")"
+[[ -f "$cocoa_log" ]] && rm "$cocoa_log"
+touch "$cocoa_log"
+
+###### => helpers ##################################################################
+# function load_helpers() {
+#     # setup the config folder
+#     source ./scripts/helpers
+# }
+
+# logging with gum fallback and file logging
+function info() {
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $*"
+    if command -v gum &>/dev/null; then
+        gum style --foreground 2 "✅ $*"
+    else
+        echo -e "\e[32m✅ $*\e[0m"
+    fi
+    echo "$message" >> "$cocoa_log"
+}
+
+function warn() {
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] WARN: $*"
+    if command -v gum &>/dev/null; then
+        gum style --foreground 3 "⚠  $*"
+    else
+        echo -e "\e[33m⚠  $*\e[0m"
+    fi
+    echo "$message" >> "$cocoa_log"
+}
+
+function error() {
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*"
+    if command -v gum &>/dev/null; then
+        gum style --foreground 1 "❌ $*" >&2
+    else
+        echo -e "\e[31m❌ $*\e[0m" >&2
+    fi
+    echo "$message" >> "$cocoa_log"
+}
+
+function log_start() {
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ===== COCOA SCRIPT STARTED ====="
+    echo "$message" >> "$cocoa_log"
+    echo "Logging to: $cocoa_log"
+}
+
+function run_and_log() {
+    local cmd="$*"
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] EXECUTING: $cmd"
+    echo "$message" >> "$cocoa_log"
+    
+    # Execute command and capture both stdout and stderr
+    if eval "$cmd" >> "$cocoa_log" 2>&1; then
+        local success_msg="[$(date '+%Y-%m-%d %H:%M:%S')] SUCCESS: $cmd"
+        echo "$success_msg" >> "$cocoa_log"
+        return 0
+    else
+        local error_msg="[$(date '+%Y-%m-%d %H:%M:%S')] FAILED: $cmd"
+        echo "$error_msg" >> "$cocoa_log"
+        return 1
+    fi
+}
+
+# UI functions
+function confirm() {
+    if command -v gum &>/dev/null; then
+        gum confirm "$1"
+    else
+        echo -n "$1 (y/n): "; read -r r; [[ "$r" =~ ^[Yy]$ ]]
+    fi
+}
+
+function choose() {
+    if command -v gum &>/dev/null; then
+        gum choose --cursor.foreground 12 --header="" --header.foreground 12 "$@"
+    else
+        select opt in "$@"; do [[ -n "$opt" ]] && { echo "$opt"; break; }; done
+    fi
+}
+
+function spin() {
+    local title="$1"; shift
+    if command -v gum &>/dev/null; then
+        gum spin --spinner="dot" --title="$title" -- "$@"
+    else
+        echo "$title"; "$@"
+    fi
+}
+
+# check and install gum
+function check_gum() {
+    if ! command -v gum &>/dev/null; then
+        warn "Gum was not found - provides better UI experience"
+        if confirm "Install gum?"; then
+            sudo pacman -S gum && { info "Restarting with gum..."; main; } || warn "Using fallback UI"
+        fi
+    fi
+}
+
+###### => functions ################################################################
+
+function configurePacman() {
+    info "Configuring Pacman..."
+    sudo --validate
+    # set pacman parallel downloads to 15 and use Colors with ILoveCandy
+    run_and_log "sudo sed -i \"s/^#\?ParallelDownloads = .*/ParallelDownloads = 15/;s/^#Color$/Color/;s/^#VerbosePkgLists$/VerbosePkgLists/\" /etc/pacman.conf"
+    run_and_log "sudo grep -q \"ILoveCandy\" /etc/pacman.conf || sudo sed -i \"/Color/a ILoveCandy\" /etc/pacman.conf"
+    info "Pacman parallel downloads set to 15 and use Colors with ILoveCandy"
+    if [[ -f /etc/paru.conf ]]; then
+        run_and_log "sudo sed -i \"s/^#BottomUp/BottomUp/\" /etc/paru.conf"
+        info "Paru reverse results order (BottomUp)"
+    fi
+}
+
+function configureJournald() {
+    info "Configuring journald..."
+    sudo --validate
+    # https://wiki.archlinux.org/title/Systemd/Journal#Journal_size_limit
+    run_and_log "sudo mkdir -p \"$journal_dir\""
+    run_and_log "cat <<'EOF' | sudo tee \"$journal_file\" > /dev/null
+[Journal]
+Storage=persistent
+SystemMaxUse=500M
+EOF"
+    run_and_log "sudo systemctl restart systemd-journald.service"
+    info "Configured journald to be persistent at a 500M limit"
+}
+
+function miscFixes() {
+    sudo --validate
+    info "Miscelaneous Fixes..."
+    gum spin --title.foreground 6 --title 'Enabling global menu support' -- \
+        sudo pacman -S --noconfirm appmenu-gtk-module libdbusmenu-glib
+}
+
+function archTweaks() {
+    tldr --update
+    miscFixes
+    configurePacman
+    configureJournald
+}
+
+function configureCLItools() {
+    sudo --validate
+    gum spin --title.foreground 6 --title 'Installing CLI tools' -- \
+        sudo pacman -S --noconfirm trash-cli tealdeer eza fzf zoxide fd yazi lazygit ncdu starship ripgrep dysk chezmoi btop
+    
+    info "CLI tools completed"
+}
+
+function installApps() {
+    sudo --validate
+    gum spin --title.foreground 6 --title 'Installing Applications' -- \
+        sudo pacman -S --noconfirm ghostty stremio discord appimagelauncher
+}
+
+function installQEMU() {
+    sudo --validate
+    gum spin --title.foreground 6 --title 'Installing QEMU and Virt Manager' -- \
+        sudo pacman -S --noconfirm qemu-full qemu-img libvirt virt-install virt-manager virt-viewer edk2-ovmf dnsmasq swtpm guestfs-tools libosinfo tuned qemu-hw-usb-host usbredir
+
+    # add our user to the correct group
+    sudo --validate
+    sudo usermod -aG libvirt $USER
+    # show group with no relog
+    newgrp libvirt
+
+    # Store the current WAN interface (the interface used to reach 8.8.8.8)
+    local wan_iface=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+    # ufw allow traffic and forwarding on virtual bridge
+    sudo ufw allow in on virbr0
+    sudo ufw allow out on virbr0
+    sudo ufw route allow in on virbr0 out on $wan_iface
+    sudo ufw route allow in on $wan_iface out on virbr0
+    sudo ufw reload
+    sudo systemctl restart ufw
+
+    info "QEMU and Virt Manager install completed"
+}
+
+function installGaming() {
+    sudo --validate
+    gum spin --title.foreground 6 --title 'Installing QEMU and Virt Manager' -- \
+        sudo pacman -S --noconfirm cachyos-gaming-meta cachyos-gaming-applications protonup-qt
+    info "Gaming meta install completed"
+}
+
+function installLazyvim() {
+    sudo --validate
+    gum spin --title.foreground 6 --title 'Installing Lazyvim requirements' -- \
+        sudo pacman -S --noconfirm bat fzf lazygit tree-sitter-cli ripgrep fd curl ttf-meslo-nerd git luarocks tectonic
+    # required
+    [[ -d "$HOME/.config/nvim" ]] && mv "$HOME/.config/nvim"{,.bak}
+
+    # optional but recommended
+    [[ -d "$HOME/.local/share/nvim" ]] && mv "$HOME/.local/share/nvim"{,.bak}
+    [[ -d "$HOME/.local/state/nvim" ]] && mv "$HOME/.local/state/nvim"{,.bak}
+    [[ -d "$HOME/.cache/nvim" ]] && mv "$HOME/.cache/nvim"{,.bak}
+    info "Backed up ~/.config/nvim config files"
+
+    gum spin --title.foreground 6 --title 'Cloning Lazyvim to ~/.config/nvim' -- \
+        git clone https://github.com/LazyVim/starter $HOME/.config/nvim
+    rm -rf "$HOME/.config/nvim/.git"
+
+    # install nvim
+    gum spin --title.foreground 6 --title 'Installing Neovim' -- \
+        sudo pacman -S --noconfirm nvim
+
+    info "Lazyvim install completed"
+
+}
+function bash_loader() {
+    mkdir -p "$bashrc_d_dir"
+    # check if bashrc has a loader for ~/.config/bashrc.d
+    if ! grep -q 'load per-user bash snippets' "$HOME/.bashrc" 2>/dev/null; then
+        printf '\n# load per-user bash snippets\nfor f in "$HOME/.config/bash/bashrc.d"/*.sh; do [ -r "$f" ] && . "$f"; done\n' >> "$HOME/.bashrc"
+        info "Added $bashrc_d_dir/*.sh loader to ~/.bashrc"
+    else
+        info "$bashrc_d_dir/*.sh loader alreadyconfigured"
+    fi
+}
+
+function zsh_loader() {
+    mkdir -p "$zshrc_d_dir"
+    # check if zshrc has a loader for ~/.config/zsh
+    if ! grep -q 'load per-user zsh snippets' "$HOME/.zshrc" 2>/dev/null; then
+        printf '\n# load per-user zsh snippets\nfor f in "$HOME/.config/zsh"/*.zsh; do [ -r "$f" ] && source "$f"; done\n' >> "$HOME/.zshrc"
+        info "Added zsh loader to ~/.zshrc"
+    fi
+    info "~/.zshrc updated (~/.config/zsh/*.zsh loader added)"
+}
+
+function sshSystemdUserService() {
+    # create and start systemd user service unit file
+    mkdir -p "$unit_dir"
+    cat > "$ssh_unit_file" <<'EOF'
+[Unit]
+Description=User SSH agent
+Documentation=man:ssh-agent(1)
+
+[Service]
+Type=simple
+Environment=SSH_AUTH_SOCK=%t/ssh-agent.socket
+ExecStart=/usr/bin/ssh-agent -D -a %t/ssh-agent.socket
+
+[Install]
+WantedBy=default.target
+EOF
+    run_and_log "systemctl --user daemon-reload"
+    run_and_log "systemctl --user enable --now ssh-agent.service"
+    info "ssh-agent systemd user service created and started"
+}
+
+function sshauthsockEnvFile() {
+    mkdir -p "$env_d_dir" "$fish_d_dir"
+    # set environment variable for agent socket
+    cat > "$ssh_env_file" <<'EOF'
+SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/ssh-agent.socket
+EOF
+    systemctl --user set-environment SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+
+    # fish fallback
+    cat > "$ssh_fish_file" <<'EOF'
+# ssh-agent (systemd) for fish
+if test -z "$SSH_AUTH_SOCK" -a -n "$XDG_RUNTIME_DIR"
+    set -gx SSH_AUTH_SOCK "$XDG_RUNTIME_DIR/ssh-agent.socket"
+end
+EOF
+    # ensure bash loader is present
+    bash_loader
+    
+    # create ssh-agent fallback for bash
+    cat > "$ssh_bash_file" <<'EOF'
+# ssh-agent (systemd) fallback for bash
+if [ -z "${SSH_AUTH_SOCK:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+fi
+EOF
+    
+#     # ensure zsh loader is present
+#     zsh_loader
+    
+#     # create ssh-agent fallback for zsh
+#     cat > "$ssh_zsh_file" <<'EOF'
+# # ssh-agent (systemd) fallback for zsh
+# if [[ -z "${SSH_AUTH_SOCK:-}" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+#   export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"
+# fi
+# EOF
+#     info "SSH_AUTH_SOCK exported (environment.d + fish + bash + zsh)"
+}
+
+function githubUpload() {
+    sudo --validate
+    gum spin --title.foreground 6 --title 'Installing github-cli' -- sudo pacman -S --noconfirm github-cli
+    gh auth login
+    
+    info "SSH key upload to GitHub completed"
+}
+
+function sshKey() {
+    # ssh config
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    
+    local create_key=$(gum choose "Create new SSH key" "I have one in $HOME/.ssh")
+    
+    if [[ "$create_key" == "Create new SSH key" ]]; then
+        key_name=$(gum input --placeholder "Enter new key name (no path, e.g. id_ed25519)")
+        ssh-keygen -t ed25519 -f "$ssh_dir/$key_name"
+        info "Created $ssh_dir/$key_name (+ .pub)"
+    else
+        # list existing keys (show base names without .pub)
+        local existing_keys=($(ls "$ssh_dir"/*.pub 2>/dev/null | xargs -n1 basename | sed 's/\.pub$//'))
+        if [[ ${#existing_keys[@]} -gt 0 ]]; then
+            # add "Specify custom key" option
+            all_options=("${existing_keys[@]}" "Specify custom key")
+            selected=$(gum choose "${all_options[@]}")
+            
+            if [[ "$selected" == "Specify custom key" ]]; then
+                key_name=$(gum input --placeholder "Enter the name of your existing key (e.g. id_ed25519)")
+            else
+                key_name="$selected"
+            fi
+        else
+            key_name=$(gum input --placeholder "Enter the name of your existing key (e.g. id_ed25519)")
+        fi
+    fi
+    
+    chmod 600 "$ssh_dir/$key_name"
+
+    echo "$key_name"
+}
+
+function configureSSH() {
+    sshSystemdUserService
+    
+    sshauthsockEnvFile
+    
+    local key_name=$(sshKey)
+    info "Using SSH key: $key_name"
+    
+    # ensure config file exists
+    touch "$ssh_config"
+    chmod 600 "$ssh_config"
+
+    # backup
+    cp -a "$ssh_config" "$ssh_config.bak.$(date +%s)"
+
+    # canonical Host * block
+    local _ssh_host_star_block=$(cat <<EOF
+Host *
+    AddKeysToAgent yes
+    IdentitiesOnly yes
+    IdentityFile ~/.ssh/$key_name
+EOF
+)
+
+    # Simple approach: use sed to remove Host * blocks completely
+    # Remove "Host *" line and all following indented lines until next non-indented line
+    sed '/^Host \*$/,/^[^[:space:]]/{
+        /^Host \*$/d
+        /^[^[:space:]]/!d
+    }' "$ssh_config" > "$ssh_config.tmp"
+    
+    # Add the new Host * block
+    echo "$_ssh_host_star_block" >> "$ssh_config.tmp"
+    
+    # Replace the original file
+    mv "$ssh_config.tmp" "$ssh_config"
+
+    info "ssh config updated (Host * block set to ~/.ssh/$key_name)"
+    info "SSH configuration completed"
+}
+
+function configureGit() {
+    sudo --validate
+    gum spin --title.foreground 6 --title 'Installing git and diff-so-fancy' -- sudo pacman -S --noconfirm git diff-so-fancy
+    # prompt for github username
+    local github_user=$(gum input --placeholder "Enter your Git username (usually GitHub username)")
+    if [[ -z "$github_user" ]]; then
+        error "GitHub username is required"
+        exit 1
+    fi
+    local key_name=$(sshKey)
+    info "Using SSH key: $key_name"
+
+    mkdir -p "$git_dir"
+    touch "$git_config"
+    if [[ -f "$HOME/.gitconfig" ]]; then
+        mv "$HOME/.gitconfig" "$HOME/.gitconfig.removeme"
+        info "Renamed existing ~/.gitconfig to ~/.gitconfig.removeme"
+    fi
+    run_and_log "git config --global init.defaultBranch \"main\""
+
+    run_and_log "git config --global user.name \"$github_user\""
+    run_and_log "git config --global user.email \"$github_user@users.noreply.github.com\""
+    run_and_log "git config --global user.signingkey \"$ssh_dir/$key_name\""
+    run_and_log "git config --global gpg.format \"ssh\""
+    run_and_log "git config --global commit.gpgsign \"true\""
+    run_and_log "git config --global core.pager \"diff-so-fancy | less --tabs=4 -RFX\""
+    run_and_log "git config --global interactive.diffFilter \"diff-so-fancy --patch\""
+
+    info "Git configuration completed"
+}
+
+# function configureXDG() {
+#     mkdir -p "$env_d_dir"
+#     cat > "$xdg_env_file" <<'EOF'
+# XDG_CONFIG_HOME=${HOME}/.config
+# XDG_CACHE_HOME=${HOME}/.local/cache
+# XDG_DATA_HOME=${HOME}/.local/share
+# XDG_STATE_HOME=${HOME}/.local/state
+# XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/flatpak/exports/share:${HOME}/.local/share/flatpak/exports/share
+# XDG_CONFIG_DIRS=/etc/xdg
+# EOF
+#     systemctl --user set-environment XDG_CONFIG_HOME="$HOME/.config"
+#     systemctl --user set-environment XDG_CACHE_HOME="$HOME/.local/cache"
+#     systemctl --user set-environment XDG_DATA_HOME="$HOME/.local/share"
+#     systemctl --user set-environment XDG_STATE_HOME="$HOME/.local/state"
+#     systemctl --user set-environment XDG_DATA_DIRS="/usr/local/share:/usr/share:/var/lib/flatpak/exports/share:${HOME}/.local/share/flatpak/exports/share"
+#     systemctl --user set-environment XDG_CONFIG_DIRS="/etc/xdg"
+
+#     info "XDG base configuration completed"
+# }
+
+###### => main #####################################################################
+function main() {
+    [[ $EUID -eq 0 ]] && { error "Don't run as root"; exit 1; }
+    log_start
+    check_gum
+    clear
+    # gum style --foreground 1 "✅ THIS IS JUST A TEST 1"
+    # gum style --foreground 2 "✅ THIS IS JUST A TEST 2"
+    # gum style --foreground 3 "✅ THIS IS JUST A TEST 3"
+    # gum style --foreground 4 "✅ THIS IS JUST A TEST 4"
+    # gum style --foreground 5 "✅ THIS IS JUST A TEST 5"
+    # gum style --foreground 6 "✅ THIS IS JUST A TEST 6"
+    # gum style --foreground 7 "✅ THIS IS JUST A TEST 7"
+    # gum style --foreground 8 "✅ THIS IS JUST A TEST 8"
+    # gum style --foreground 9 "✅ THIS IS JUST A TEST 9"
+    # gum style --foreground 10 "✅ THIS IS JUST A TEST 10"
+    # gum style --foreground 11 "✅ THIS IS JUST A TEST 11"
+    # gum style --foreground 12 "✅ THIS IS JUST A TEST 12"
+    # gum style --foreground 13 "✅ THIS IS JUST A TEST 13"
+    # gum style --foreground 14 "✅ THIS IS JUST A TEST 14"
+    # gum style --foreground 15 "✅ THIS IS JUST A TEST 15"
+    # gum style --foreground 16 "✅ THIS IS JUST A TEST 16"
+    # gum style --foreground 17 "✅ THIS IS JUST A TEST 17"
+    # gum style --foreground 18 "✅ THIS IS JUST A TEST 18"
+    # gum style --foreground 19 "✅ THIS IS JUST A TEST 19"
+    # gum style --foreground 20 "✅ THIS IS JUST A TEST 20"
+    if command -v gum &>/dev/null; then
+        gum style --bold --padding "0 2" --border double --border-foreground 12 "☕ Cocoa system configuration script"
+    else
+    	echo -e "\e[36m☕ Cocoa system configuration script\e[0m"
+    fi
+    while true; do
+	local choice=$(choose \
+            "🚀 Complete Installation (recommended)" \
+            "🛠️ Enable rc.d-style configs for all shells" \
+            "🔑 SSH configuration" \
+            "📤 Upload SSH key to GitHub" \
+            "🌱 Git configuration" \
+            "⚙️ Arch tweaks" \
+            "🖥️ CLI tools" \
+            "📦 Lazyvim install" \
+            "🔧 Enable SDDM Service" \
+            "🎨 Select Theme Variant" \
+            "✨ Preview the set theme" \
+            "❌ Exit")
+
+        info "User selected: $choice"
+
+	case "$choice" in
+            "🚀 Complete Installation (recommended)") 
+                info "Starting complete installation..."
+                bash_loader && configureSSH && githubUpload && configureGit && archTweaks && info "Everything done!" && exit 0;;
+            # "🏠 XDG base configuration")
+            #     info "Starting XDG base configuration..."
+            #     configureXDG ;;
+            "🛠️ Enable rc.d-style configs for all shells")
+                info "Starting Enable rc.d-style configs for all shells..."
+                bash_loader  ;;
+            "🔑 SSH configuration")
+                info "Starting SSH configuration..."
+                configureSSH ;;
+            "📤 Upload SSH key to GitHub")
+                info "Starting SSH key upload to GitHub..."
+                githubUpload ;;
+            "🌱 Git configuration")
+                info "Starting Git configuration..."
+                configureGit ;;
+            "⚙️ Arch tweaks") 
+                info "Starting Arch tweaks..."
+                archTweaks ;;
+            "🖥️CLI tools") 
+                info "Starting CLI tools..."
+                configureCLItools ;;
+            "📦 Lazyvim install")
+                info "Starting Lazyvim install..."
+                installLazyvim ;;
+            "🔧 Enable SDDM Service") 
+                info "Starting SDDM service configuration..."
+                enable_sddm ;;
+            "🎨 Select Theme Variant") 
+                info "Starting theme selection..."
+                select_theme ;;
+            "✨ Preview the set theme") 
+                info "Starting theme preview..."
+                preview_theme;;
+            "❌ Exit") 
+                info "User chose to exit. Time for a hot coco!"; 
+                exit 0 ;;
+        esac
+
+        echo; if command -v gum &>/dev/null; then
+            gum input --placeholder="Press Enter to continue..."
+        else
+            echo -n "Press Enter to continue..."; read -r
+        fi
+    done
+}
+
+# trap 'echo; info "Cancelled"; exit 130' INT TERM
+main "$@"
+# main "$@" | tee -a $cocoa_log
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
